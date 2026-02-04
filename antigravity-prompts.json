@@ -1,0 +1,236 @@
+{
+  "project_name": "Telegram Dual Bot Payment System",
+  "project_description": "Hệ thống 2 bot Telegram (Client + Admin) tích hợp Laravel backend, USDT payment gateway tự động, và admin approval workflow",
+  "tech_stack": {
+    "backend": "Laravel 12",
+    "database": "MySQL 8.0",
+    "cache": "Redis",
+    "queue": "Laravel Queue with Redis",
+    "telegram_sdk": "irazasyed/telegram-bot-sdk",
+    "payment": "USDT (TRC20) via API Gateway"
+  },
+  
+  "prompts": [
+    {
+      "step": 1,
+      "title": "Khởi tạo Project Laravel & Database Schema",
+      "prompt": "Tạo một project Laravel 12 mới với tên 'telegram-payment-system'. Cấu hình database MySQL với các bảng sau:\n\n1. **customers**: Lưu thông tin khách hàng từ Telegram\n   - id (primary key)\n   - telegram_chat_id (unique, string)\n   - telegram_username (nullable, string)\n   - telegram_first_name (nullable, string)\n   - telegram_last_name (nullable, string)\n   - balance (decimal 10,2, default 0)\n   - is_verified (boolean, default false)\n   - created_at, updated_at\n\n2. **transactions**: Lưu các giao dịch\n   - id (primary key)\n   - customer_id (foreign key -> customers.id)\n   - code (unique, string) - Mã khách hàng nhập vào\n   - status (enum: pending, payment_required, payment_confirmed, admin_review, approved, rejected)\n   - amount (decimal 10,2) - Số tiền giao dịch\n   - usdt_tx_hash (nullable, string) - Transaction hash USDT\n   - data (text, nullable) - Dữ liệu trả về cho client (JSON)\n   - paid_at (timestamp, nullable)\n   - approved_at (timestamp, nullable)\n   - rejected_at (timestamp, nullable)\n   - admin_note (text, nullable)\n   - created_at, updated_at\n\n3. **payments**: Lưu thông tin thanh toán USDT\n   - id (primary key)\n   - customer_id (foreign key -> customers.id)\n   - transaction_id (foreign key -> transactions.id, nullable)\n   - payment_address (string) - Địa chỉ ví nhận\n   - amount (decimal 10,2)\n   - tx_hash (string, nullable) - Hash giao dịch blockchain\n   - status (enum: pending, confirmed, failed)\n   - confirmed_at (timestamp, nullable)\n   - created_at, updated_at\n\n4. **admin_actions**: Log hành động admin\n   - id (primary key)\n   - admin_telegram_id (string)\n   - transaction_id (foreign key -> transactions.id)\n   - action (enum: approved, rejected)\n   - note (text, nullable)\n   - created_at\n\nTạo migrations, models với relationships, và seeders mẫu.",
+      "expected_output": [
+        "Laravel project structure đầy đủ",
+        "Migration files cho 4 tables",
+        "Models: Customer, Transaction, Payment, AdminAction",
+        "Relationships: hasMany, belongsTo",
+        "Seeders với dữ liệu test"
+      ]
+    },
+    
+    {
+      "step": 2,
+      "title": "Cài Đặt & Cấu Hình Telegram Bot SDK",
+      "prompt": "Cài đặt package 'irazasyed/telegram-bot-sdk' và cấu hình 2 bot Telegram:\n\n1. Client Bot:\n   - Token: Lấy từ .env (TELEGRAM_CLIENT_BOT_TOKEN)\n   - Webhook URL: /api/telegram/client/webhook\n   - Commands hỗ trợ: /start, /balance, /history\n\n2. Admin Bot:\n   - Token: Lấy từ .env (TELEGRAM_ADMIN_BOT_TOKEN)\n   - Admin Chat ID: Lấy từ .env (TELEGRAM_ADMIN_CHAT_ID)\n   - Webhook URL: /api/telegram/admin/webhook\n\nTạo service classes:\n- TelegramClientService: Xử lý logic client bot\n- TelegramAdminService: Xử lý logic admin bot\n\nTạo middleware VerifyTelegramWebhook để xác thực webhook từ Telegram.\n\nThêm vào .env:\nTELEGRAM_CLIENT_BOT_TOKEN=your_client_token\nTELEGRAM_ADMIN_BOT_TOKEN=your_admin_token\nTELEGRAM_ADMIN_CHAT_ID=your_admin_chat_id",
+      "expected_output": [
+        "composer.json updated với telegram-bot-sdk",
+        "config/telegram.php configuration file",
+        "Services: TelegramClientService.php, TelegramAdminService.php",
+        "Middleware: VerifyTelegramWebhook.php",
+        "Routes trong api.php cho webhooks"
+      ]
+    },
+    
+    {
+      "step": 3,
+      "title": "Xây Dựng Client Bot Controller & Logic",
+      "prompt": "Tạo ClientBotController với các chức năng:\n\n**1. Xử lý lệnh /start:**\n- Tạo hoặc lấy customer từ database bằng telegram_chat_id\n- Lưu thông tin: username, first_name, last_name\n- Gửi message chào mừng với hướng dẫn sử dụng\n- Format: \"👋 Chào mừng {name}!\\n\\nVui lòng nhập mã để sử dụng dịch vụ.\\nVí dụ: ABC123\\n\\n💰 Số dư hiện tại: {balance} USDT\"\n\n**2. Xử lý lệnh /balance:**\n- Hiển thị số dư USDT hiện tại\n- Hiển thị số giao dịch đã hoàn thành\n\n**3. Xử lý lệnh /history:**\n- Hiển thị 10 giao dịch gần nhất\n- Format: \"📋 Lịch sử giao dịch\\n\\n\" + danh sách với mã, trạng thái, số tiền, thời gian\n\n**4. Xử lý nhập mã (text message):**\n- Validate mã (alphanumeric, 6-20 ký tự)\n- Kiểm tra customer đã có giao dịch approved trước đó chưa\n- Tạo transaction mới với status 'pending'\n\n**Nếu khách hàng MỚI (chưa có giao dịch approved):**\n- Set transaction status = 'payment_required'\n- Gọi PaymentService->generatePaymentRequest()\n- Gửi message yêu cầu nạp USDT với:\n  - Số tiền cần nạp (default: 10 USDT)\n  - Địa chỉ ví nhận (TRC20)\n  - Hướng dẫn thanh toán\n  - Message: \"💰 YÊU CẦU NẠP TIỀN\\n\\nSố tiền: {amount} USDT (TRC20)\\nĐịa chỉ ví: `{address}`\\n\\n⚠️ Chỉ chuyển USDT TRC20!\\n⏳ Hệ thống sẽ tự động xác nhận sau 1-2 phút.\"\n\n**Nếu khách hàng CŨ (đã có giao dịch approved):**\n- Set transaction status = 'admin_review'\n- Gửi message: \"✅ Đã nhận mã: {code}\\n\\n⏳ Đang chờ admin xác nhận...\\n💰 Số dư: {balance} USDT\"\n- Trigger job NotifyAdminForApproval\n\nXử lý callback queries (buttons) nếu có.",
+      "expected_output": [
+        "ClientBotController.php với đầy đủ methods",
+        "Validation rules cho input",
+        "Integration với Customer model",
+        "Integration với Transaction model",
+        "Error handling đầy đủ"
+      ]
+    },
+    
+    {
+      "step": 4,
+      "title": "Xây Dựng USDT Payment Integration",
+      "prompt": "Tạo PaymentService và PaymentWebhookController để xử lý thanh toán USDT tự động:\n\n**PaymentService:**\n\n1. Method generatePaymentRequest($transaction):\n   - Tạo payment record mới\n   - Generate unique payment address hoặc sử dụng address cố định với memo\n   - Gọi API của payment gateway để tạo payment session\n   - Return payment address và amount\n\n2. Method checkPaymentStatus($paymentId):\n   - Query API gateway để check trạng thái\n   - Return status: pending/confirmed/failed\n\n3. Method confirmPayment($payment, $txHash):\n   - Update payment status = 'confirmed'\n   - Update payment tx_hash\n   - Cộng tiền vào customer balance\n   - Update transaction liên quan: status = 'payment_confirmed'\n   - Trigger notification đến client\n   - Trigger job NotifyAdminForApproval\n\n**PaymentWebhookController:**\n\n1. Method handle(Request $request):\n   - Verify webhook signature (HMAC SHA256)\n   - Extract data: tx_hash, amount, address, status\n   - Find payment record by address\n   - Validate amount matches\n   - Call PaymentService->confirmPayment()\n   - Send Telegram message to client: \"✅ Nạp tiền thành công!\\n\\nSố tiền: {amount} USDT\\nTX Hash: {hash}\\n💰 Số dư mới: {balance} USDT\\n\\n⏳ Đang chờ admin xác nhận yêu cầu của bạn...\"\n   - Return JSON response {'status': 'ok'}\n\n**Environment Variables:**\n- USDT_PAYMENT_API_URL\n- USDT_PAYMENT_API_KEY\n- USDT_PAYMENT_WEBHOOK_SECRET\n- USDT_WALLET_ADDRESS (địa chỉ ví nhận)\n\n**Routes:**\n- POST /api/payment/webhook (public, có middleware verify signature)\n\n**Security:**\n- Validate webhook signature bằng HMAC\n- Rate limiting cho webhook endpoint\n- Log tất cả payment events",
+      "expected_output": [
+        "PaymentService.php với 3 methods chính",
+        "PaymentWebhookController.php",
+        "Webhook signature verification",
+        "Integration với Payment model",
+        "Logging system cho payments"
+      ]
+    },
+    
+    {
+      "step": 5,
+      "title": "Xây Dựng Admin Bot Controller & Approval System",
+      "prompt": "Tạo AdminBotController với hệ thống approval:\n\n**Webhook Handler:**\n\n1. Method webhook(Request $request):\n   - Parse Telegram update\n   - Check if has callback_query (button click)\n   - Route to handleCallbackQuery()\n\n**Callback Query Handler:**\n\n1. Method handleCallbackQuery($callbackQuery):\n   - Parse callback_data format: \"approve_{transaction_id}\" hoặc \"reject_{transaction_id}\"\n   - Extract action và transaction_id\n   - Find transaction by ID\n   - Route to approveTransaction() hoặc rejectTransaction()\n   - Answer callback query với Telegram API\n\n**Approve Flow:**\n\n1. Method approveTransaction($transaction, $chatId, $messageId):\n   - Validate transaction status = 'admin_review'\n   - Check customer có đủ balance không\n   - Update transaction:\n     - status = 'approved'\n     - approved_at = now()\n   - Trừ tiền customer: balance -= transaction.amount\n   - Create AdminAction log\n   - Update admin message (editMessageText):\n     \"✅ ĐÃ DUYỆT\\n\\nMã: {code}\\nKhách hàng: @{username}\\n💰 Số tiền: {amount} USDT\\n⏰ Thời gian duyệt: {approved_at}\\n👤 Admin: {admin_name}\"\n   - Trigger job SendDataToClient\n\n**Reject Flow:**\n\n1. Method rejectTransaction($transaction, $chatId, $messageId):\n   - Update transaction:\n     - status = 'rejected'\n     - rejected_at = now()\n   - Create AdminAction log\n   - Update admin message:\n     \"❌ ĐÃ TỪ CHỐI\\n\\nMã: {code}\\nKhách hàng: @{username}\\n⏰ Thời gian từ chối: {rejected_at}\\n👤 Admin: {admin_name}\"\n   - Send message to client:\n     \"❌ YÊU CẦU BỊ TỪ CHỐI\\n\\nMã: {code}\\n⏰ Thời gian: {rejected_at}\\n\\n💬 Vui lòng liên hệ admin để biết thêm chi tiết.\"\n\n**Admin Commands:**\n\n1. /stats - Hiển thị thống kê:\n   - Tổng giao dịch hôm nay\n   - Tổng doanh thu\n   - Số giao dịch đang chờ\n   - Số khách hàng active\n\n2. /pending - Hiển thị danh sách giao dịch đang chờ duyệt",
+      "expected_output": [
+        "AdminBotController.php đầy đủ",
+        "Callback query parsing logic",
+        "Transaction approval/rejection flow",
+        "Admin message formatting",
+        "AdminAction logging"
+      ]
+    },
+    
+    {
+      "step": 6,
+      "title": "Xây Dựng Queue Jobs System",
+      "prompt": "Tạo các Laravel Queue Jobs để xử lý async:\n\n**1. NotifyAdminForApproval Job:**\n- Trigger khi: Transaction status chuyển sang 'admin_review'\n- Logic:\n  - Load transaction với customer relationship\n  - Tạo inline keyboard với 2 buttons:\n    - \"✅ Duyệt\" -> callback_data: \"approve_{id}\"\n    - \"❌ Từ chối\" -> callback_data: \"reject_{id}\"\n  - Format message:\n    \"🔔 YÊU CẦU MỚI #{id}\\n\\n👤 Khách hàng: @{username} ({first_name})\\n📝 Mã: {code}\\n💰 Số tiền: {amount} USDT\\n💳 Số dư hiện tại: {balance} USDT\\n⏰ Thời gian: {created_at}\\n\\n📊 Lịch sử:\\n- Tổng giao dịch: {total_transactions}\\n- Đã approved: {approved_count}\\n- Đã từ chối: {rejected_count}\"\n  - Send message đến admin bot với keyboard\n  - Update transaction status = 'admin_review'\n\n**2. SendDataToClient Job:**\n- Trigger khi: Transaction được approved\n- Logic:\n  - Load transaction data (JSON field)\n  - Format message với data:\n    \"✅ YÊU CẦU ĐÃ ĐƯỢC DUYỆT\\n\\n📝 Mã: {code}\\n💵 Đã trừ: {amount} USDT\\n💰 Số dư còn lại: {balance} USDT\\n⏰ Thời gian: {approved_at}\\n\\n📊 DỮ LIỆU CỦA BẠN:\\n{formatted_data}\"\n  - Nếu có file URL trong data, gửi document/photo\n  - Send message đến client bot\n\n**3. ProcessPaymentConfirmation Job:**\n- Trigger khi: Payment webhook nhận confirmed\n- Logic:\n  - Update payment record\n  - Cộng balance cho customer\n  - Find pending transaction\n  - Update transaction status\n  - Notify client về payment success\n  - Trigger NotifyAdminForApproval\n\n**4. CleanupExpiredPayments Job (scheduled):**\n- Chạy mỗi giờ\n- Logic:\n  - Find payments với status 'pending' > 24h\n  - Update status = 'failed'\n  - Notify customers về expired payment\n\n**Queue Configuration:**\n- Queue connection: redis\n- Queue name: telegram-jobs\n- Retry: 3 times\n- Timeout: 60 seconds\n- Failed jobs table cho tracking",
+      "expected_output": [
+        "4 Job classes trong app/Jobs/",
+        "Queue configuration trong queue.php",
+        "Failed jobs migration",
+        "Scheduled task trong Kernel.php",
+        "Job dispatching trong controllers"
+      ]
+    },
+    
+    {
+      "step": 7,
+      "title": "Xây Dựng Auto-Approve Logic cho Khách Cũ",
+      "prompt": "Implement tính năng tự động duyệt cho khách hàng đã có lịch sử tốt:\n\n**AutoApprovalService:**\n\n1. Method shouldAutoApprove(Customer $customer): bool\n   - Điều kiện auto-approve:\n     - Có ít nhất 3 giao dịch đã approved\n     - Không có giao dịch bị reject trong 30 ngày gần đây\n     - Balance >= amount cần trừ\n     - Không có giao dịch đang pending khác\n   - Return true/false\n\n2. Method autoApprove(Transaction $transaction): void\n   - Update transaction: status = 'approved', approved_at = now()\n   - Trừ tiền customer\n   - Create AdminAction với note \"Auto-approved by system\"\n   - Trigger SendDataToClient job\n   - Log auto-approval event\n\n**Tích hợp vào ClientBotController:**\n\nTrong handleCode() method, sau khi tạo transaction cho khách cũ:\n\n```php\nif ($previousTransaction) {\n    $transaction->update(['status' => 'admin_review']);\n    \n    // Check auto-approve\n    $autoApprovalService = new AutoApprovalService();\n    if ($autoApprovalService->shouldAutoApprove($customer)) {\n        $autoApprovalService->autoApprove($transaction);\n        \n        $this->telegram->sendMessage([\n            'chat_id' => $chatId,\n            'text' => \"✅ Đã tự động xử lý yêu cầu của bạn!\\n\\n\"\n                   . \"📝 Mã: {$code}\\n\"\n                   . \"💵 Đã trừ: {$transaction->amount} USDT\\n\"\n                   . \"💰 Số dư: {$customer->balance} USDT\\n\\n\"\n                   . \"📊 Dữ liệu đang được xử lý...\"\n        ]);\n    } else {\n        // Send to admin review\n        dispatch(new NotifyAdminForApproval($transaction));\n        \n        $this->telegram->sendMessage([\n            'chat_id' => $chatId,\n            'text' => \"✅ Đã nhận mã: {$code}\\n\\n\"\n                   . \"⏳ Đang chờ admin xác nhận...\"\n        ]);\n    }\n}\n```\n\n**Admin Notification khi Auto-Approve:**\n- Gửi message info đến admin (không cần approval button):\n  \"ℹ️ TỰ ĐỘNG DUYỆT\\n\\n👤 Khách hàng: @{username}\\n📝 Mã: {code}\\n💰 Số tiền: {amount} USDT\\n⏰ Thời gian: {now}\\n✅ Lý do: Khách hàng có lịch sử tốt\"",
+      "expected_output": [
+        "AutoApprovalService.php với 2 methods",
+        "Integration vào ClientBotController",
+        "Auto-approve conditions logic",
+        "Notification system cho auto-approval",
+        "Logging cho auto-approval events"
+      ]
+    },
+    
+    {
+      "step": 8,
+      "title": "Xây Dựng API Routes & Security",
+      "prompt": "Thiết lập routes, middleware, và security cho toàn bộ hệ thống:\n\n**Routes (routes/api.php):**\n\n```php\nRoute::prefix('telegram')->group(function() {\n    Route::post('/client/webhook', [ClientBotController::class, 'webhook'])\n        ->middleware('verify.telegram:client');\n    \n    Route::post('/admin/webhook', [AdminBotController::class, 'webhook'])\n        ->middleware('verify.telegram:admin');\n    \n    Route::get('/setup', [TelegramSetupController::class, 'setWebhooks'])\n        ->middleware('auth.admin'); // Chỉ chạy 1 lần\n});\n\nRoute::post('/payment/webhook', [PaymentWebhookController::class, 'handle'])\n    ->middleware('verify.payment.signature');\n```\n\n**Middleware: VerifyTelegramWebhook**\n\n```php\npublic function handle($request, Closure $next, $botType)\n{\n    $token = $botType === 'client' \n        ? config('telegram.bots.client.token')\n        : config('telegram.bots.admin.token');\n    \n    // Verify secret token header\n    $secretToken = $request->header('X-Telegram-Bot-Api-Secret-Token');\n    $expectedToken = hash('sha256', $token);\n    \n    if (!hash_equals($expectedToken, $secretToken ?? '')) {\n        Log::warning('Invalid Telegram webhook', [\n            'ip' => $request->ip(),\n            'bot_type' => $botType\n        ]);\n        abort(403, 'Unauthorized');\n    }\n    \n    return $next($request);\n}\n```\n\n**Middleware: VerifyPaymentSignature**\n\n```php\npublic function handle($request, Closure $next)\n{\n    $signature = $request->header('X-Webhook-Signature');\n    $secret = config('payment.webhook_secret');\n    $payload = $request->getContent();\n    \n    $expectedSignature = hash_hmac('sha256', $payload, $secret);\n    \n    if (!hash_equals($expectedSignature, $signature ?? '')) {\n        Log::warning('Invalid payment webhook', [\n            'ip' => $request->ip()\n        ]);\n        abort(403, 'Invalid signature');\n    }\n    \n    return $next($request);\n}\n```\n\n**Rate Limiting:**\n\n```php\n// app/Providers/RouteServiceProvider.php\nRateLimiter::for('telegram', function (Request $request) {\n    return Limit::perMinute(60)->by($request->ip());\n});\n\nRateLimiter::for('payment', function (Request $request) {\n    return Limit::perMinute(30)->by($request->ip());\n});\n```\n\n**CORS Configuration:**\n- Disable CORS cho webhook endpoints (không cần)\n\n**Environment Variables Security:**\n- Tất cả sensitive data trong .env\n- Sử dụng config() helper thay vì env() trong code\n- Add .env.example với placeholders",
+      "expected_output": [
+        "routes/api.php configured đầy đủ",
+        "2 middleware classes",
+        "Rate limiting configuration",
+        "Security headers",
+        ".env.example file"
+      ]
+    },
+    
+    {
+      "step": 9,
+      "title": "Xây Dựng Admin Dashboard (Optional)",
+      "prompt": "Tạo web-based admin dashboard để quản lý và theo dõi:\n\n**Routes (routes/web.php):**\n\n```php\nRoute::prefix('admin')->middleware(['auth', 'admin'])->group(function() {\n    Route::get('/dashboard', [AdminDashboardController::class, 'index']);\n    Route::get('/transactions', [AdminDashboardController::class, 'transactions']);\n    Route::get('/customers', [AdminDashboardController::class, 'customers']);\n    Route::get('/payments', [AdminDashboardController::class, 'payments']);\n    Route::post('/transactions/{id}/approve', [AdminDashboardController::class, 'approve']);\n    Route::post('/transactions/{id}/reject', [AdminDashboardController::class, 'reject']);\n});\n```\n\n**Dashboard Features:**\n\n1. **Overview Page:**\n   - Cards: Tổng doanh thu, Giao dịch hôm nay, Khách hàng mới, Đang chờ duyệt\n   - Chart: Doanh thu 7 ngày gần đây (Chart.js)\n   - Bảng: 10 giao dịch mới nhất\n\n2. **Transactions Page:**\n   - DataTable với filters: status, date range, customer\n   - Columns: ID, Customer, Code, Amount, Status, Created, Actions\n   - Actions: View details, Approve, Reject\n   - Export to Excel\n\n3. **Customers Page:**\n   - DataTable khách hàng\n   - Columns: ID, Username, Balance, Total Transactions, Approved Count, Created\n   - Search by username, chat_id\n   - View customer transaction history\n\n4. **Payments Page:**\n   - DataTable payments\n   - Columns: ID, Customer, Amount, TX Hash, Status, Confirmed At\n   - Link to blockchain explorer\n\n**Authentication:**\n- Laravel Breeze hoặc Fortify\n- Simple login form\n- Admin user seeder\n\n**Frontend:**\n- Blade templates\n- Tailwind CSS hoặc Bootstrap 5\n- Alpine.js cho interactivity\n- Chart.js cho graphs",
+      "expected_output": [
+        "AdminDashboardController.php",
+        "Blade views: dashboard, transactions, customers, payments",
+        "Authentication setup",
+        "DataTables integration",
+        "Chart.js integration"
+      ]
+    },
+    
+    {
+      "step": 10,
+      "title": "Testing, Logging & Monitoring",
+      "prompt": "Implement comprehensive testing, logging và monitoring:\n\n**1. Unit Tests:**\n\nTạo tests cho:\n- CustomerTest: CRUD operations, balance calculations\n- TransactionTest: Status transitions, validations\n- PaymentServiceTest: Payment generation, confirmation\n- AutoApprovalServiceTest: Auto-approve logic conditions\n\n**2. Feature Tests:**\n\nTạo tests cho:\n- ClientBotControllerTest:\n  - test_start_command_creates_customer()\n  - test_code_input_requires_payment_for_new_customer()\n  - test_code_input_sends_to_admin_for_existing_customer()\n  - test_balance_command_shows_correct_balance()\n\n- AdminBotControllerTest:\n  - test_approve_callback_updates_transaction()\n  - test_reject_callback_notifies_client()\n  - test_approve_deducts_customer_balance()\n\n- PaymentWebhookControllerTest:\n  - test_valid_webhook_confirms_payment()\n  - test_invalid_signature_returns_403()\n  - test_webhook_triggers_admin_notification()\n\n**3. Logging System:**\n\nConfig logging channels (config/logging.php):\n\n```php\n'channels' => [\n    'telegram' => [\n        'driver' => 'daily',\n        'path' => storage_path('logs/telegram.log'),\n        'level' => 'debug',\n        'days' => 14,\n    ],\n    'payment' => [\n        'driver' => 'daily',\n        'path' => storage_path('logs/payment.log'),\n        'level' => 'info',\n        'days' => 30,\n    ],\n    'transaction' => [\n        'driver' => 'daily',\n        'path' => storage_path('logs/transaction.log'),\n        'level' => 'info',\n        'days' => 30,\n    ],\n]\n```\n\nLog events:\n- Customer tạo mới\n- Transaction status changes\n- Payment confirmations\n- Admin actions\n- Auto-approval events\n- Webhook failures\n- Queue job failures\n\n**4. Monitoring:**\n\nTạo artisan commands:\n\n```php\n// Check pending payments\nphp artisan monitor:pending-payments\n\n// Check failed jobs\nphp artisan monitor:failed-jobs\n\n// Send daily report to admin\nphp artisan report:daily\n```\n\n**5. Error Handling:**\n\n- Global exception handler\n- Custom exceptions: PaymentException, TelegramApiException\n- Friendly error messages cho users\n- Detailed error logs cho developers\n\n**6. Performance Monitoring:**\n\n- Query logging for slow queries\n- Job execution time tracking\n- API response time monitoring",
+      "expected_output": [
+        "Test suite với >80% coverage",
+        "Logging channels configured",
+        "Monitoring commands",
+        "Exception handlers",
+        "Performance tracking setup"
+      ]
+    },
+    
+    {
+      "step": 11,
+      "title": "Deployment Setup & Documentation",
+      "prompt": "Chuẩn bị deployment và documentation hoàn chỉnh:\n\n**1. Docker Setup:**\n\nTạo docker-compose.yml:\n\n```yaml\nversion: '3.8'\nservices:\n  app:\n    build: .\n    ports:\n      - \"8000:8000\"\n    environment:\n      - DB_HOST=mysql\n      - REDIS_HOST=redis\n    depends_on:\n      - mysql\n      - redis\n  \n  mysql:\n    image: mysql:8.0\n    environment:\n      - MYSQL_DATABASE=telegram_payment\n      - MYSQL_ROOT_PASSWORD=secret\n    volumes:\n      - mysql_data:/var/lib/mysql\n  \n  redis:\n    image: redis:alpine\n    ports:\n      - \"6379:6379\"\n  \n  queue-worker:\n    build: .\n    command: php artisan queue:work redis --tries=3\n    depends_on:\n      - mysql\n      - redis\n\nvolumes:\n  mysql_data:\n```\n\n**2. Deployment Scripts:**\n\nTạo deploy.sh:\n\n```bash\n#!/bin/bash\ngit pull origin main\ncomposer install --no-dev --optimize-autoloader\nphp artisan migrate --force\nphp artisan config:cache\nphp artisan route:cache\nphp artisan view:cache\nphp artisan queue:restart\nsupervisorctl restart laravel-worker:*\n```\n\n**3. Supervisor Configuration:**\n\nTạo laravel-worker.conf:\n\n```ini\n[program:laravel-worker]\nprocess_name=%(program_name)s_%(process_num)02d\ncommand=php /path/to/artisan queue:work redis --sleep=3 --tries=3 --max-time=3600\nautostart=true\nautorestart=true\nstopasgroup=true\nkillasgroup=true\nuser=www-data\nnumprocs=4\nredirect_stderr=true\nstdout_logfile=/path/to/worker.log\nstopwaitsecs=3600\n```\n\n**4. Nginx Configuration:**\n\nTạo nginx.conf cho Laravel:\n\n```nginx\nserver {\n    listen 80;\n    server_name yourdomain.com;\n    root /var/www/html/public;\n\n    add_header X-Frame-Options \"SAMEORIGIN\";\n    add_header X-Content-Type-Options \"nosniff\";\n\n    index index.php;\n\n    location / {\n        try_files $uri $uri/ /index.php?$query_string;\n    }\n\n    location ~ \\.php$ {\n        fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;\n        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;\n        include fastcgi_params;\n    }\n\n    location ~ /\\.(?!well-known).* {\n        deny all;\n    }\n}\n```\n\n**5. SSL Setup (Certbot):**\n\n```bash\nsudo certbot --nginx -d yourdomain.com\n```\n\n**6. Documentation:**\n\nTạo README.md với:\n- Project overview\n- System requirements\n- Installation steps\n- Configuration guide\n- Telegram bot setup guide\n- Payment gateway setup\n- Webhook setup\n- Testing guide\n- Deployment guide\n- Troubleshooting\n\nTạo API.md với:\n- Webhook endpoints documentation\n- Payload examples\n- Response formats\n- Error codes\n\n**7. Environment Checklist:**\n\nTạo .env.production.example:\n\n```env\nAPP_ENV=production\nAPP_DEBUG=false\nAPP_URL=https://yourdomain.com\n\nDB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_PORT=3306\nDB_DATABASE=telegram_payment\nDB_USERNAME=root\nDB_PASSWORD=\n\nREDIS_HOST=127.0.0.1\nREDIS_PASSWORD=null\nREDIS_PORT=6379\n\nQUEUE_CONNECTION=redis\n\nTELEGRAM_CLIENT_BOT_TOKEN=\nTELEGRAM_ADMIN_BOT_TOKEN=\nTELEGRAM_ADMIN_CHAT_ID=\n\nUSDT_PAYMENT_API_URL=\nUSDT_PAYMENT_API_KEY=\nUSDT_PAYMENT_WEBHOOK_SECRET=\nUSDT_WALLET_ADDRESS=\n```",
+      "expected_output": [
+        "docker-compose.yml",
+        "deploy.sh script",
+        "Supervisor config",
+        "Nginx config",
+        "README.md comprehensive",
+        "API.md documentation",
+        ".env.production.example"
+      ]
+    },
+    
+    {
+      "step": 12,
+      "title": "Post-Deployment Setup & Webhooks",
+      "prompt": "Tạo setup scripts và commands để cấu hình sau khi deploy:\n\n**1. Artisan Command: SetupTelegramWebhooks**\n\n```php\nphp artisan telegram:setup-webhooks\n```\n\nCommand logic:\n- Set webhook cho client bot: {APP_URL}/api/telegram/client/webhook\n- Set webhook cho admin bot: {APP_URL}/api/telegram/admin/webhook\n- Set secret token cho mỗi bot\n- Verify webhook URLs accessible\n- Test gửi message đến admin bot\n- Output success/error messages\n\n**2. Artisan Command: TestPaymentWebhook**\n\n```php\nphp artisan payment:test-webhook\n```\n\nCommand logic:\n- Tạo test payment record\n- Generate test webhook payload\n- Sign payload với secret\n- POST đến /api/payment/webhook\n- Verify response và database changes\n- Cleanup test data\n\n**3. Artisan Command: CreateAdminUser**\n\n```php\nphp artisan admin:create\n```\n\nCommand logic:\n- Prompt for admin email, password, telegram_id\n- Create user với admin role\n- Output admin dashboard URL\n\n**4. Health Check Endpoint:**\n\nTạo route GET /api/health:\n\n```php\nRoute::get('/health', function() {\n    return response()->json([\n        'status' => 'ok',\n        'database' => DB::connection()->getPdo() ? 'connected' : 'disconnected',\n        'redis' => Redis::connection()->ping() ? 'connected' : 'disconnected',\n        'telegram_client' => app(TelegramClientService::class)->checkConnection(),\n        'telegram_admin' => app(TelegramAdminService::class)->checkConnection(),\n        'queue' => Queue::size('telegram-jobs'),\n    ]);\n});\n```\n\n**5. Monitoring Commands:**\n\n```php\n// Check system status\nphp artisan system:status\n\n// View pending approvals\nphp artisan admin:pending\n\n// Send test notification to admin\nphp artisan admin:test-notify\n```",
+      "expected_output": [
+        "4 custom artisan commands",
+        "Health check endpoint",
+        "Webhook setup automation",
+        "Testing utilities",
+        "Admin user creation tool"
+      ]
+    }
+  ],
+  
+  "final_deliverables": {
+    "code": [
+      "Complete Laravel 12 project",
+      "12 migration files",
+      "4 models with relationships",
+      "3 controllers (Client, Admin, Payment)",
+      "3 services (TelegramClient, TelegramAdmin, Payment, AutoApproval)",
+      "4 queue jobs",
+      "6 custom artisan commands",
+      "2 middleware classes",
+      "Test suite (>80% coverage)",
+      "AdminDashboard (optional)"
+    ],
+    "documentation": [
+      "README.md",
+      "API.md",
+      "DEPLOYMENT.md",
+      ".env.example",
+      "docker-compose.yml",
+      "nginx.conf",
+      "supervisor.conf"
+    ],
+    "features": [
+      "✅ Dual Telegram bots (Client + Admin)",
+      "✅ USDT TRC20 automatic payment",
+      "✅ Webhook-based payment verification",
+      "✅ Admin manual approval system",
+      "✅ Auto-approval cho khách cũ",
+      "✅ Balance management",
+      "✅ Transaction history",
+      "✅ Queue jobs với Redis",
+      "✅ Comprehensive logging",
+      "✅ Admin dashboard (web)",
+      "✅ Health monitoring",
+      "✅ Docker support",
+      "✅ Production-ready deployment"
+    ]
+  },
+  
+  "development_timeline": {
+    "step_1_2": "1 day - Project setup & database",
+    "step_3_4": "2 days - Client bot & payment integration",
+    "step_5_6": "2 days - Admin bot & queue jobs",
+    "step_7_8": "1 day - Auto-approval & security",
+    "step_9": "1 day - Admin dashboard (optional)",
+    "step_10_11_12": "1 day - Testing & deployment setup",
+    "total": "7-8 days for complete system"
+  },
+  
+  "testing_checklist": [
+    "✅ New customer nhập mã → yêu cầu nạp tiền",
+    "✅ Payment webhook → confirm payment → notify admin",
+    "✅ Admin approve → trừ tiền → gửi data về client",
+    "✅ Admin reject → notify client",
+    "✅ Existing customer nhập mã → auto-approve (nếu đủ điều kiện)",
+    "✅ Existing customer nhập mã → send to admin (nếu không đủ điều kiện)",
+    "✅ Balance calculations correct",
+    "✅ Transaction status transitions valid",
+    "✅ Webhook signature verification",
+    "✅ Rate limiting works",
+    "✅ Queue jobs process correctly",
+    "✅ Error handling graceful"
+  ]
+}
